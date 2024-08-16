@@ -51,7 +51,7 @@ import {
 import type {RelayPolicy, Profile} from "src/domain"
 import type {Session, NostrConnectHandler} from "src/engine/model"
 import {GroupAccess} from "src/engine/model"
-import {NostrConnectBroker} from "src/engine/utils"
+import {NostrConnectBroker, withExtension} from "src/engine/utils"
 import {repository} from "src/engine/repository"
 import {
   canSign,
@@ -962,17 +962,36 @@ export const loginWithPublicKey = pubkey => addSession({method: "pubkey", pubkey
 
 export const loginWithExtension = pubkey => addSession({method: "extension", pubkey})
 
-export const loginWithNsecBunker = async (pubkey, connectToken, connectRelay) => {
+const createConnectSession = async (): Promise<Session> => {
+  let connectPubkey: string | undefined
+  await withExtension(async (ext) => {
+    connectPubkey = await ext.getPublicKey()
+  })
+  if (connectPubkey) {
+    return {
+      method: "extension",
+      pubkey: connectPubkey,
+    }
+  }
   const connectKey = generatePrivateKey()
+  return {
+    method: "privkey",
+    pubkey: getPublicKey(connectKey),
+    privkey: connectKey,
+  }
+}
+
+export const loginWithNsecBunker = async (pubkey, connectToken, connectRelay) => {
+  const connectSession = await createConnectSession()
   const connectHandler = {relays: [connectRelay]}
-  const broker = NostrConnectBroker.get(pubkey, connectKey, connectHandler)
+  const broker = NostrConnectBroker.get(pubkey, connectSession, connectHandler)
   const result = await broker.connect(connectToken)
 
   if (result) {
     addSession({
       method: "connect",
       pubkey,
-      connectKey,
+      connectSession,
       connectToken,
       connectHandler,
     })
@@ -982,10 +1001,10 @@ export const loginWithNsecBunker = async (pubkey, connectToken, connectRelay) =>
 }
 
 export const loginWithNostrConnect = async (username, connectHandler: NostrConnectHandler) => {
-  const connectKey = generatePrivateKey()
+  const connectSession = await createConnectSession()
   const {pubkey} = (await loadHandle(`${username}@${connectHandler.domain}`)) || {}
 
-  let broker = NostrConnectBroker.get(pubkey, connectKey, connectHandler)
+  let broker = NostrConnectBroker.get(pubkey, connectSession, connectHandler)
 
   if (!pubkey) {
     const pubkey = await broker.createAccount(username)
@@ -994,7 +1013,7 @@ export const loginWithNostrConnect = async (username, connectHandler: NostrConne
       return null
     }
 
-    broker = NostrConnectBroker.get(pubkey, connectKey, connectHandler)
+    broker = NostrConnectBroker.get(pubkey, connectSession, connectHandler)
   }
 
   const result = await broker.connect()
@@ -1003,7 +1022,7 @@ export const loginWithNostrConnect = async (username, connectHandler: NostrConne
     addSession({
       method: "connect",
       pubkey: broker.pubkey,
-      connectKey,
+      connectSession,
       connectHandler,
     })
   }

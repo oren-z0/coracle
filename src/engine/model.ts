@@ -105,7 +105,7 @@ export type Session = {
   method: string
   pubkey: string
   privkey?: string
-  connectKey?: string
+  connectSession?: Session
   connectToken?: string
   connectHandler?: NostrConnectHandler
   settings?: Record<string, any>

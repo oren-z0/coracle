@@ -1,6 +1,5 @@
 import {equals} from "ramda"
 import type {EventTemplate} from "nostr-tools"
-import {nip04, finalizeEvent} from "nostr-tools"
 import {Emitter, now} from "@welshman/lib"
 import {createEvent} from "@welshman/util"
 import type {TrustedEvent} from "@welshman/util"
@@ -9,9 +8,11 @@ import {subscribe, publish} from "@welshman/net"
 import {randomId, sleep} from "hurdak"
 import {NostrConnect} from "nostr-tools/kinds"
 import logger from "src/util/logger"
-import {getPublicKey} from "src/util/nostr"
 import {tryJson} from "src/util/misc"
 import type {NostrConnectHandler, Session} from "src/engine/model"
+import { getNip04, getSigner } from "./getters"
+import type { Nip04 } from "./nip04"
+import type { Signer } from "./signer"
 
 let singleton: NostrConnectBroker
 
@@ -24,15 +25,18 @@ export class NostrConnectBroker extends Emitter {
   #ready = sleep(500)
   #closed = false
   #connectResult: any
+  #nip04: Nip04
+  #signer: Signer
 
-  static get(pubkey, connectKey: string, handler: NostrConnectHandler) {
+  static get(pubkey, connectSession: Session, handler: NostrConnectHandler) {
     if (
       singleton?.pubkey !== pubkey ||
-      singleton?.connectKey !== connectKey ||
+      singleton?.connectSession.method !== connectSession.method ||
+      singleton?.connectSession.pubkey !== connectSession.pubkey ||
       !equals(singleton?.handler, handler)
     ) {
       singleton?.teardown()
-      singleton = new NostrConnectBroker(pubkey, connectKey, handler)
+      singleton = new NostrConnectBroker(pubkey, connectSession, handler)
     }
 
     return singleton
@@ -40,10 +44,13 @@ export class NostrConnectBroker extends Emitter {
 
   constructor(
     readonly pubkey: string,
-    readonly connectKey: string,
+    readonly connectSession: Session,
     readonly handler: NostrConnectHandler,
   ) {
     super()
+
+    this.#nip04 = getNip04(connectSession)
+    this.#signer = getSigner(connectSession)
 
     this.subscribe()
   }
@@ -55,13 +62,13 @@ export class NostrConnectBroker extends Emitter {
         {
           since: now() - 30,
           kinds: [NostrConnect],
-          "#p": [getPublicKey(this.connectKey)],
+          "#p": [this.connectSession.pubkey],
         },
       ],
     })
 
     this.#sub.emitter.on("event", async (url: string, e: TrustedEvent) => {
-      const json = await nip04.decrypt(this.connectKey, e.pubkey, e.content)
+      const json = await this.#nip04.decryptAsUser(e.content, e.pubkey)
       const {id, result, error} = tryJson(() => JSON.parse(json)) || {error: "invalid-response"}
 
       logger.info("NostrConnect response:", {id, result, error})
@@ -87,9 +94,9 @@ export class NostrConnectBroker extends Emitter {
     const id = randomId()
     const pubkey = admin ? this.handler.pubkey : this.pubkey
     const payload = JSON.stringify({id, method, params})
-    const content = await nip04.encrypt(this.connectKey, pubkey, payload)
+    const content = await this.#nip04.encryptAsUser(payload, pubkey)
     const template = createEvent(NostrConnect, {content, tags: [["p", pubkey]]})
-    const event = finalizeEvent(template, this.connectKey as any)
+    const event = await this.#signer.signAsUser(template)
 
     logger.info("NostrConnect request:", {id, method, params})
 
@@ -164,9 +171,13 @@ export class Connect {
 
   constructor(readonly session: Session) {
     if (this.isEnabled()) {
-      const {pubkey, connectKey, connectHandler} = session
+      const {pubkey, connectSession, connectHandler} = session
 
-      this.broker = NostrConnectBroker.get(pubkey, connectKey, connectHandler)
+      this.broker = NostrConnectBroker.get(
+        pubkey,
+        connectSession,
+        connectHandler,
+      )
       this.broker.connect()
     }
   }
